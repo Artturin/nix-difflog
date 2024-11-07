@@ -1,0 +1,106 @@
+#!/bin/bash
+set -eu
+
+usage() {
+    cat >&2 <<'EOF'
+usage: ./difflog $out1 $out2
+
+Compare two Nix build logs, normalizing out boring differences.
+
+This can be useful to test the effect of a change to build scripts,
+especially a refactoring that's intended to have no effect.
+
+Each argument can be either:
+ * the store path of a build output, or
+ * the store path of a derivation for the build.
+
+Each argument will be passed to `nix log` to get the log,
+and also used to find the output hash to normalize out.
+
+Normalization includes:
+ * replacing the output hash with zeroes
+ * stripping ECMA-48(-style) terminal controls, like colors
+ * replacing dates, timestamps, and timings with constants
+ * sorting runs of certain common messages, to reduce
+   nondeterminism from concurrency
+EOF
+}
+
+
+extract_hash() {
+    local b="${1##*/}"
+    echo "${b%%-*}"
+}
+
+find_hash() {
+    local outpath
+    if [[ "$1" = *.drv ]]; then
+        outpath=$(nix show-derivation "$1" \
+                  | jq -r '
+                      to_entries | .[0].value.outputs.out.path
+                      ')
+    else
+        outpath=$1
+    fi
+
+    extract_hash "$outpath"
+}
+
+striplog() {
+    hash=$(find_hash "$1")
+
+    # `expand` is because in `make` trace lines, I see
+    # continuation lines indented with tabs locally
+    # but spaces in cached builds.
+    nix log "$1" \
+      | expand \
+      | hash="$hash" \
+        perl -0pe '
+          # Normalize away the output hash.
+          s<$ENV{"hash"}>
+           <00000000000000000000000000000000>g;
+
+          # I see these locally but not in cached builds.
+          s<^\@nix \{.*\n><>gm;
+
+          # ECMA-48 control sequences.  I see color in gcc warnings
+          # locally, but not in cached builds.
+          s<\e\[.*?[\x40-\x7e]><>g;
+
+          # And some other kinds of ECMA-48(-style) terminal magic.
+          s<\e[\x20-\x2f].><>g;
+          s<\e[\x30-\x5f]><>g;
+
+          # Fix some dates that sneak in impurely.
+          s<^configure: autobuild timestamp\.\.\. \K\d+-\d+>
+           <20200102-030405>gm;
+
+          # And timestamps, and times.
+          s<^\d?\K ?\d:\d\d\.\d+ >
+           < 0:00.00 >gm;
+          s<\b(time: |elapsed: |in )\K\d+(\.\d+)?s>
+           <0.00s>ig;
+
+          # Sort runs of adjacent lines of each of these types.
+          s<(^(libtool: compile: |/nix/store/\S+/bin/bash \S+/libtool ).*\n)+>
+           < join("", sort(split /^/, $&)) >egm;
+          s<(^(libtool: link: |/nix/store/\S+/bin/bash \S+/libtool ).*\n)+>
+           < join("", sort(split /^/, $&)) >egm;
+          s<(^shrinking /nix/store/.*\n)+>
+           < join("", sort(split /^/, $&)) >egm;
+          s<(^/nix/store/\S+: interpreter directive changed .*\n)+>
+           < join("", sort(split /^/, $&)) >egm;
+        '
+}
+
+d=$(mktemp -d)
+
+if ! (( $# == 2 )); then
+    usage
+    exit 2
+fi
+
+striplog "$1" >"$d"/a.log
+striplog "$2" >"$d"/b.log
+
+git diff --no-index "$d"/{a,b}.log
