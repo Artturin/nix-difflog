@@ -28,61 +28,13 @@ original program by gnprice https://gist.github.com/gnprice/1864b871656773f78f41
 EOF
 }
 
-
-extract_hash() {
-    local b="${1##*/}"
-    echo "${b%%-*}"
-}
-
-find_hash() {
-    local outpath
-    outpath=$(nix show-derivation "$1" \
-              | jq -r '
-                  to_entries | .[0].value.outputs.out.path
-                  ')
-
-    extract_hash "$outpath"
-}
-
-find_hash_lib() {
-    local outpath
-    outpath=$(nix show-derivation "$1" \
-              | jq -r '
-                  to_entries | .[0].value.outputs.lib.path
-                  ')
-
-    extract_hash "$outpath"
-}
-
-find_hash_dev() {
-    local outpath
-    outpath=$(nix show-derivation "$1" \
-              | jq -r '
-                  to_entries | .[0].value.outputs.dev.path
-                  ')
-
-    extract_hash "$outpath"
-}
-
 striplog() {
-    export hash=$(find_hash "$1")
-    export libhash=$(find_hash_lib "$1")
-    export devhash=$(find_hash_dev "$1")
-
     # `expand` is because in `make` trace lines, I see
     # continuation lines indented with tabs locally
     # but spaces in cached builds.
     nix log "$1" \
       | expand \
       | perl -0pe '
-          # Normalize away the output hash.
-          s<$ENV{"hash"}>
-           <00000000000000000000000000000000>g;
-          s<$ENV{"libhash"}>
-           <00000000000000000000000000000000>g;
-          s<$ENV{"devhash"}>
-           <00000000000000000000000000000000>g;
-
           # Normalize all store hashes
           s|\Q/nix/store\E/[a-z0-9]{32}-|/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-|g;
 
